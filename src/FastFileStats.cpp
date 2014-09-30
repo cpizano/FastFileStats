@@ -116,22 +116,43 @@ bool CreateFFS(BYTE* start, DWORD size, const wchar_t* top_dir) {
   auto header = reinterpret_cast<FFS_Header*>(mem);
   *header = FFS_Header{FFS_kMagic, FFS_kVersion, FFS_kBooting, 0, 0, 0};
   mem += sizeof(*header);
-
   auto w32fd = reinterpret_cast<WIN32_FIND_DATA*>(mem);
-  auto fff = ::FindFirstFileW(top_dir, w32fd);
-  if (fff == INVALID_HANDLE_VALUE)
-    return false;
 
-  ++w32fd;
-  DWORD count = 1;
-  while (::FindNextFileW(fff, w32fd)) {
-    if (w32fd->dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+  const int xxx = sizeof(WIN32_FIND_DATA);
 
-    ++w32fd;
-    ++count;
+  std::vector<std::wstring> pending_dirs;
+  std::vector<std::wstring> found_dirs;
+
+  DWORD all_count = 1;
+  pending_dirs.push_back(top_dir);
+
+  while (pending_dirs.size()) {
+    for (auto& dir : pending_dirs) {
+      auto wildc = dir + L"\\*";
+      auto fff = ::FindFirstFileW(wildc.c_str(), w32fd);
+      if (fff == INVALID_HANDLE_VALUE)
+        return false;
+
+      while (::FindNextFileW(fff, ++w32fd)) {
+        if (w32fd->dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)
+          __debugbreak();
+
+        if (w32fd->dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+          if (w32fd->cFileName[0] != '.')
+            found_dirs.emplace_back((dir + L"\\") + w32fd->cFileName);
+        }
+
+        ++all_count;
+      }
+
+      ++w32fd;
+      ::FindClose(fff);
+    }
+
+    pending_dirs = found_dirs;
+    found_dirs.clear();
   }
 
-  ::FindClose(fff);
   return true;
 }
 
@@ -142,16 +163,18 @@ int ExceptionFilter(EXCEPTION_POINTERS *ep, BYTE* start, DWORD max_size) {
   auto addr = reinterpret_cast<BYTE*>(ep->ExceptionRecord->ExceptionInformation[1]);
   if ((addr < start) || (addr > (start + max_size)))
     return EXCEPTION_CONTINUE_SEARCH;
-  // In our range, map two pages.
-  auto new_addr = ::VirtualAlloc(addr, 1024*8, MEM_COMMIT, PAGE_READWRITE);
+  // In our range, map another meg.
+  auto new_addr = ::VirtualAlloc(addr, 1024 * 1024, MEM_COMMIT, PAGE_READWRITE);
+  if (!new_addr)
+    __debugbreak();
   return EXCEPTION_CONTINUE_EXECUTION;
 }
 
 int __stdcall wWinMain(HINSTANCE module, HINSTANCE, wchar_t* cc, int) {
-  const wchar_t dir[] = L"f:\\src\\*";
+  const wchar_t dir[] = L"f:\\src";
 
-  // optimistically try to fit all data in 80 MB.
-  const DWORD kMaxSize = 1024 * 1024 * 80;
+  // optimistically try to fit all data in 300 MB.
+  const DWORD kMaxSize = 1024 * 1024 * 300;
   auto mmap = ::CreateFileMappingW(
       INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE | SEC_RESERVE, 0, kMaxSize, L"ffs_dir01");
   auto start = reinterpret_cast<BYTE*>(
