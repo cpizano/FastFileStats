@@ -1,181 +1,113 @@
+///////////////////////////////////////////////////////////////////////////////////////////////////
 // Server main entry point.
 
 #include "stdafx.h"
 #include "FastFileStats.h"
 
-#define MAX_LOADSTRING 100
+extern "C" IMAGE_DOS_HEADER __ImageBase;
 
-// Global Variables:
-HINSTANCE hInst;								// current instance
-TCHAR szTitle[MAX_LOADSTRING];					// The title bar text
-TCHAR szWindowClass[MAX_LOADSTRING];			// the main window class name
-
-// Forward declarations of functions included in this code module:
-ATOM				MyRegisterClass(HINSTANCE hInstance);
-BOOL				InitInstance(HINSTANCE, int);
-LRESULT CALLBACK	WndProc(HWND, UINT, WPARAM, LPARAM);
-INT_PTR CALLBACK	About(HWND, UINT, WPARAM, LPARAM);
-
-int APIENTRY _tWinMain(_In_ HINSTANCE hInstance,
-                     _In_opt_ HINSTANCE hPrevInstance,
-                     _In_ LPTSTR    lpCmdLine,
-                     _In_ int       nCmdShow)
-{
-	UNREFERENCED_PARAMETER(hPrevInstance);
-	UNREFERENCED_PARAMETER(lpCmdLine);
-
- 	// TODO: Place code here.
-	MSG msg;
-	HACCEL hAccelTable;
-
-	// Initialize global strings
-	LoadString(hInstance, IDS_APP_TITLE, szTitle, MAX_LOADSTRING);
-	LoadString(hInstance, IDC_FASTFILESTATS, szWindowClass, MAX_LOADSTRING);
-	MyRegisterClass(hInstance);
-
-	// Perform application initialization:
-	if (!InitInstance (hInstance, nCmdShow))
-	{
-		return FALSE;
-	}
-
-	hAccelTable = LoadAccelerators(hInstance, MAKEINTRESOURCE(IDC_FASTFILESTATS));
-
-	// Main message loop:
-	while (GetMessage(&msg, NULL, 0, 0))
-	{
-		if (!TranslateAccelerator(msg.hwnd, hAccelTable, &msg))
-		{
-			TranslateMessage(&msg);
-			DispatchMessage(&msg);
-		}
-	}
-
-	return (int) msg.wParam;
+HINSTANCE ThisModule() {
+  return reinterpret_cast<HINSTANCE>(&__ImageBase);
 }
 
+template <typename T, typename U>
+T VerifyNot(T actual, U error) {
+  if (actual != error)
+    return actual;
 
-
-//
-//  FUNCTION: MyRegisterClass()
-//
-//  PURPOSE: Registers the window class.
-//
-ATOM MyRegisterClass(HINSTANCE hInstance)
-{
-	WNDCLASSEX wcex;
-
-	wcex.cbSize = sizeof(WNDCLASSEX);
-
-	wcex.style			= CS_HREDRAW | CS_VREDRAW;
-	wcex.lpfnWndProc	= WndProc;
-	wcex.cbClsExtra		= 0;
-	wcex.cbWndExtra		= 0;
-	wcex.hInstance		= hInstance;
-	wcex.hIcon			= LoadIcon(hInstance, MAKEINTRESOURCE(IDI_FASTFILESTATS));
-	wcex.hCursor		= LoadCursor(NULL, IDC_ARROW);
-	wcex.hbrBackground	= (HBRUSH)(COLOR_WINDOW+1);
-	wcex.lpszMenuName	= MAKEINTRESOURCE(IDC_FASTFILESTATS);
-	wcex.lpszClassName	= szWindowClass;
-	wcex.hIconSm		= LoadIcon(wcex.hInstance, MAKEINTRESOURCE(IDI_SMALL));
-
-	return RegisterClassEx(&wcex);
+  volatile ULONG err = ::GetLastError();
+  __debugbreak();
+  __assume(0);
 }
 
-//
-//   FUNCTION: InitInstance(HINSTANCE, int)
-//
-//   PURPOSE: Saves instance handle and creates main window
-//
-//   COMMENTS:
-//
-//        In this function, we save the instance handle in a global variable and
-//        create and display the main program window.
-//
-BOOL InitInstance(HINSTANCE hInstance, int nCmdShow)
-{
-   HWND hWnd;
+typedef LRESULT (* MsgCallBack)(HWND, WPARAM, LPARAM);
+struct MessageHandler {
+  UINT message;
+  MsgCallBack callback;
+};
 
-   hInst = hInstance; // Store instance handle in our global variable
 
-   hWnd = CreateWindow(szWindowClass, szTitle, WS_OVERLAPPEDWINDOW,
-      CW_USEDEFAULT, 0, CW_USEDEFAULT, 0, NULL, NULL, hInstance, NULL);
+HWND MakeWindow(
+    const wchar_t* title, ULONG style, HMENU menu, const SIZE& size, MessageHandler* handlers) {
+  WNDCLASSEXW wcex = {sizeof(wcex)};
+  wcex.hCursor = ::LoadCursorW(NULL, IDC_ARROW);
+  wcex.hInstance = ThisModule();
+  wcex.lpszClassName = __FILEW__;
+  wcex.lpfnWndProc = [] (HWND window, UINT message, WPARAM wparam, LPARAM lparam) -> LRESULT {
+    static MessageHandler* s_handlers = reinterpret_cast<MessageHandler*>(lparam);
+    size_t ix = 0;
+    while (s_handlers[ix].message != -1) {
+      if (s_handlers[ix].message == message)
+        return s_handlers[ix].callback(window, wparam, lparam);
+      ++ix;
+    }
 
-   if (!hWnd)
-   {
-      return FALSE;
-   }
+    return ::DefWindowProcW(window, message, wparam, lparam);
+  };
 
-   ShowWindow(hWnd, nCmdShow);
-   UpdateWindow(hWnd);
-
-   return TRUE;
+  wcex.lpfnWndProc(NULL, 0, 0, reinterpret_cast<UINT_PTR>(handlers));
+  ATOM atom = VerifyNot(::RegisterClassExW(&wcex), 0);
+  int pos_def = CW_USEDEFAULT;
+  return ::CreateWindowExW(0, MAKEINTATOM(atom), title, style,
+                           pos_def, pos_def, size.cx, size.cy,
+                           NULL, menu, ThisModule(), NULL); 
 }
 
-//
-//  FUNCTION: WndProc(HWND, UINT, WPARAM, LPARAM)
-//
-//  PURPOSE:  Processes messages for the main window.
-//
-//  WM_COMMAND	- process the application menu
-//  WM_PAINT	- Paint the main window
-//  WM_DESTROY	- post a quit message and return
-//
-//
-LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
-{
-	int wmId, wmEvent;
-	PAINTSTRUCT ps;
-	HDC hdc;
+int RunMainUILoop() {
+  static HPEN pen_dot = ::CreatePen(PS_DOT, 1, RGB(0, 0, 0));
 
-	switch (message)
-	{
-	case WM_COMMAND:
-		wmId    = LOWORD(wParam);
-		wmEvent = HIWORD(wParam);
-		// Parse the menu selections:
-		switch (wmId)
-		{
-		case IDM_ABOUT:
-			DialogBox(hInst, MAKEINTRESOURCE(IDD_ABOUTBOX), hWnd, About);
-			break;
-		case IDM_EXIT:
-			DestroyWindow(hWnd);
-			break;
-		default:
-			return DefWindowProc(hWnd, message, wParam, lParam);
-		}
-		break;
-	case WM_PAINT:
-		hdc = BeginPaint(hWnd, &ps);
-		// TODO: Add any drawing code here...
-		EndPaint(hWnd, &ps);
-		break;
-	case WM_DESTROY:
-		PostQuitMessage(0);
-		break;
-	default:
-		return DefWindowProc(hWnd, message, wParam, lParam);
-	}
-	return 0;
+  MessageHandler msg_handlers[] = {
+    { WM_PAINT, [] (HWND window, WPARAM, LPARAM) -> LRESULT {
+      PAINTSTRUCT ps;
+      HDC dc = ::BeginPaint(window, &ps);
+      ::Rectangle(dc, 10, 10, 100, 100);
+      ::EndPaint(window, &ps);
+      return 0;
+    }},
+
+    { WM_ERASEBKGND, [] (HWND window, WPARAM wparam, LPARAM) -> LRESULT {
+      RECT rect;
+      VerifyNot(::GetClientRect(window, &rect), FALSE);
+      HGDIOBJ prev_obj = ::SelectObject(HDC(wparam), pen_dot);
+      ::Rectangle(HDC(wparam), rect.left, rect.top, rect.right, rect.bottom);
+      ::SelectObject(HDC(wparam),  prev_obj);
+      return 0;
+    }},
+
+    { WM_DISPLAYCHANGE, [] (HWND window, WPARAM, LPARAM) -> LRESULT {
+      ::InvalidateRect(window, NULL, TRUE);
+      return 0;
+    }},
+
+    { WM_CLOSE, [] (HWND window, WPARAM, LPARAM) -> LRESULT {
+      ::PostQuitMessage(0);
+      return 0;
+    }},
+
+    { WM_ENDSESSION, [] (HWND window, WPARAM, LPARAM) -> LRESULT {
+      ::PostQuitMessage(0);
+      return 0;
+    }},
+
+    {-1, NULL}
+  };
+
+  SIZE size = {200, 200};
+  HWND main_window = VerifyNot(
+      MakeWindow(L"fastfilestats/by/cpu",
+                 WS_OVERLAPPEDWINDOW | WS_VISIBLE, NULL,
+                 size,
+                 msg_handlers), HWND(NULL));
+
+  MSG msg;
+  while (VerifyNot(::GetMessageW(&msg, NULL, 0, 0), -1)) {
+    ::DispatchMessageW(&msg);
+  }
+
+  return 0;
 }
 
-// Message handler for about box.
-INT_PTR CALLBACK About(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)
-{
-	UNREFERENCED_PARAMETER(lParam);
-	switch (message)
-	{
-	case WM_INITDIALOG:
-		return (INT_PTR)TRUE;
+int __stdcall wWinMain(HINSTANCE module, HINSTANCE, wchar_t* cc, int) {
 
-	case WM_COMMAND:
-		if (LOWORD(wParam) == IDOK || LOWORD(wParam) == IDCANCEL)
-		{
-			EndDialog(hDlg, LOWORD(wParam));
-			return (INT_PTR)TRUE;
-		}
-		break;
-	}
-	return (INT_PTR)FALSE;
+  return RunMainUILoop();
 }
