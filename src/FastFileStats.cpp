@@ -2,6 +2,10 @@
 // Server main entry point.
 
 #include "stdafx.h"
+#include <string>
+#include <vector>
+
+#include "resource.h"
 #include "FastFileStats.h"
 
 extern "C" IMAGE_DOS_HEADER __ImageBase;
@@ -107,7 +111,61 @@ int RunMainUILoop() {
   return 0;
 }
 
+bool CreateFFS(BYTE* start, DWORD size, const wchar_t* top_dir) {
+  auto mem = start;
+  auto header = reinterpret_cast<FFS_Header*>(mem);
+  *header = FFS_Header{FFS_kMagic, FFS_kVersion, FFS_kBooting, 0, 0, 0};
+  mem += sizeof(*header);
+
+  auto w32fd = reinterpret_cast<WIN32_FIND_DATA*>(mem);
+  auto fff = ::FindFirstFileW(top_dir, w32fd);
+  if (fff == INVALID_HANDLE_VALUE)
+    return false;
+
+  ++w32fd;
+  DWORD count = 1;
+  while (::FindNextFileW(fff, w32fd)) {
+    if (w32fd->dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+
+    ++w32fd;
+    ++count;
+  }
+
+  ::FindClose(fff);
+  return true;
+}
+
+
+int ExceptionFilter(EXCEPTION_POINTERS *ep, BYTE* start, DWORD max_size) {
+  if (ep->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION)
+    return EXCEPTION_CONTINUE_SEARCH;
+  auto addr = reinterpret_cast<BYTE*>(ep->ExceptionRecord->ExceptionInformation[1]);
+  if ((addr < start) || (addr > (start + max_size)))
+    return EXCEPTION_CONTINUE_SEARCH;
+  // In our range, map two pages.
+  auto new_addr = ::VirtualAlloc(addr, 1024*8, MEM_COMMIT, PAGE_READWRITE);
+  return EXCEPTION_CONTINUE_EXECUTION;
+}
+
 int __stdcall wWinMain(HINSTANCE module, HINSTANCE, wchar_t* cc, int) {
+  const wchar_t dir[] = L"f:\\src\\*";
+
+  // optimistically try to fit all data in 80 MB.
+  const DWORD kMaxSize = 1024 * 1024 * 80;
+  auto mmap = ::CreateFileMappingW(
+      INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE | SEC_RESERVE, 0, kMaxSize, L"ffs_dir01");
+  auto start = reinterpret_cast<BYTE*>(
+      ::MapViewOfFile(mmap, FILE_MAP_ALL_ACCESS, 0, 0, kMaxSize));
+  if (!start)
+    return 1;
+
+  __try {
+    if (!CreateFFS(start, kMaxSize, dir))
+      return 2;
+
+  } __except (ExceptionFilter(GetExceptionInformation(), start, kMaxSize)) {
+    return 3;
+  }
 
   return RunMainUILoop();
 }
