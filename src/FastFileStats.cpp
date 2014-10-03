@@ -115,6 +115,19 @@ int RunMainUILoop() {
   return 0;
 }
 
+// adapted to start from the back.
+DWORD Hash_FNV1a_32(BYTE* bp, size_t len) {
+  auto be = bp + len - 1;
+  DWORD hval = 0x811c9dc5UL;
+  while (bp <= be) {
+    hval ^= (DWORD)*be--;
+    hval += (hval << 1) + (hval << 4) + (hval << 7) +
+            (hval << 8) + (hval << 24);
+  }
+  return hval;
+}
+
+
 bool AddDir(const wchar_t* name) {
   if (name[0] != '.')
     return true;
@@ -137,6 +150,8 @@ bool CreateFFS(BYTE* const start, DWORD size, const wchar_t* top_dir) {
   std::vector<Entry> pending_dirs;
   std::vector<Entry> found_dirs;
 
+  std::vector<DWORD> dir_offsets[FFS_BucketCount];
+
   DWORD all_count = 0;
   DWORD dir_count = 0;
   DWORD pending_fixes = 0;
@@ -152,7 +167,7 @@ bool CreateFFS(BYTE* const start, DWORD size, const wchar_t* top_dir) {
         ++pending_fixes;
         continue;
       }
-
+      // stuff the offset to the parent directory.
       w32fd->dwReserved0 = std::get<1>(e);
       ++all_count;
 
@@ -161,7 +176,10 @@ bool CreateFFS(BYTE* const start, DWORD size, const wchar_t* top_dir) {
       if ((w32fd->cFileName[0] != '.') || (w32fd->cFileName[1] != 0))
         __debugbreak();
 #endif
+      auto hash = Hash_FNV1a_32(reinterpret_cast<BYTE*>(&std::get<0>(e)[0]),
+                                std::get<0>(e).size() * 2);
 
+      dir_offsets[hash % FFS_BucketCount].emplace_back(DWORD(w32fd) - DWORD(start));
       ++w32fd;
       while (::FindNextFileW(fff, w32fd)) {
         // stuff the offset to the parent directory.
@@ -171,8 +189,8 @@ bool CreateFFS(BYTE* const start, DWORD size, const wchar_t* top_dir) {
           ++reparse_count;
         } else if (w32fd->dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
           if (AddDir(w32fd->cFileName)) {
-            found_dirs.emplace_back((std::get<0>(e) + L"\\") + w32fd->cFileName, 
-                                     DWORD(w32fd) - DWORD(start));
+            found_dirs.emplace_back((std::get<0>(e) + L"\\") + w32fd->cFileName,
+                                    DWORD(w32fd) - DWORD(start));
             ++dir_count;
           }
         }
@@ -193,6 +211,19 @@ bool CreateFFS(BYTE* const start, DWORD size, const wchar_t* top_dir) {
   header->num_dirs = dir_count;
   header->num_nodes = all_count;
   header->status = FFS_kUpdating;
+
+#if defined(PARANOID)
+  int cc_h = 0;
+  int cc_l = 0;
+  for (auto& i : dir_offsets) {
+    if (i.size() > 67) ++cc_h;
+    if (i.size() < 5) ++cc_l;
+  }
+  if (cc_h > 10)
+    __debugbreak();
+  if (cc_l > 10)
+    __debugbreak();
+#endif
 
   return true;
 }

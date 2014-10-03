@@ -28,3 +28,15 @@ enum FFS_Status {
   FFS_kFrozen         = 5,
 };
 
+enum FFS_Buckets {
+  FFS_BucketCount = 1543
+};
+
+struct FFS_DirNode {
+  DWORD offset[1];
+};
+
+struct FFS_Dir {
+  DWORD count;
+  FFS_DirNode nodes[FFS_BucketCount];
+};
