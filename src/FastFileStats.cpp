@@ -10,6 +10,8 @@
 #include "resource.h"
 #include "FastFileStats.h"
 
+#define PARANOID 1
+
 extern "C" IMAGE_DOS_HEADER __ImageBase;
 
 HINSTANCE ThisModule() {
@@ -156,7 +158,7 @@ bool CreateFFS(BYTE* const start, DWORD size, const wchar_t* top_dir) {
 
 #if defined(PARANOID)
       // The first entry is always ".".
-      if ((w32fd->cFileName[0] != '.') && (w32fd->cFileName[1] != 0))
+      if ((w32fd->cFileName[0] != '.') || (w32fd->cFileName[1] != 0))
         __debugbreak();
 #endif
 
@@ -186,8 +188,6 @@ bool CreateFFS(BYTE* const start, DWORD size, const wchar_t* top_dir) {
     found_dirs.clear();
   }
 
-  //if (all_count != 393625) != 419399)
-  //  __debugbreak();
 
   header->bytes = DWORD(w32fd) - DWORD(start);
   header->num_dirs = dir_count;
