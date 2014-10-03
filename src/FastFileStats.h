@@ -4,7 +4,7 @@ struct FFS_Header {
   DWORD magic;
   DWORD version;
   DWORD status;
-  DWORD num_files;
+  DWORD num_nodes;
   DWORD num_dirs;
   DWORD bytes;
   DWORD pad1;

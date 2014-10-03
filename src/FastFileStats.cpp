@@ -2,7 +2,9 @@
 // Server main entry point.
 
 #include "stdafx.h"
+
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include "resource.h"
@@ -111,47 +113,86 @@ int RunMainUILoop() {
   return 0;
 }
 
-bool CreateFFS(BYTE* start, DWORD size, const wchar_t* top_dir) {
+bool AddDir(const wchar_t* name) {
+  if (name[0] != '.')
+    return true;
+  if (name[1] == 0)
+    return false;
+  if (name[1] != '.')
+    return true;
+  return false;
+}
+
+bool CreateFFS(BYTE* const start, DWORD size, const wchar_t* top_dir) {
   auto mem = start;
   auto header = reinterpret_cast<FFS_Header*>(mem);
   *header = FFS_Header{FFS_kMagic, FFS_kVersion, FFS_kBooting, 0, 0, 0};
   mem += sizeof(*header);
   auto w32fd = reinterpret_cast<WIN32_FIND_DATA*>(mem);
 
-  const int xxx = sizeof(WIN32_FIND_DATA);
+  typedef std::tuple<std::wstring, DWORD> Entry;
 
-  std::vector<std::wstring> pending_dirs;
-  std::vector<std::wstring> found_dirs;
+  std::vector<Entry> pending_dirs;
+  std::vector<Entry> found_dirs;
 
-  DWORD all_count = 1;
-  pending_dirs.push_back(top_dir);
+  DWORD all_count = 0;
+  DWORD dir_count = 0;
+  DWORD pending_fixes = 0;
+  DWORD reparse_count = 0;
+
+  pending_dirs.emplace_back(top_dir, 0);
 
   while (pending_dirs.size()) {
-    for (auto& dir : pending_dirs) {
-      auto wildc = dir + L"\\*";
+    for (auto& e : pending_dirs) {
+      auto wildc = std::get<0>(e) + L"\\*";
       auto fff = ::FindFirstFileW(wildc.c_str(), w32fd);
-      if (fff == INVALID_HANDLE_VALUE)
-        return false;
+      if (fff == INVALID_HANDLE_VALUE) {
+        ++pending_fixes;
+        continue;
+      }
 
-      while (::FindNextFileW(fff, ++w32fd)) {
-        if (w32fd->dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)
-          __debugbreak();
+      w32fd->dwReserved0 = std::get<1>(e);
+      ++all_count;
 
-        if (w32fd->dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-          if (w32fd->cFileName[0] != '.')
-            found_dirs.emplace_back((dir + L"\\") + w32fd->cFileName);
+#if defined(PARANOID)
+      // The first entry is always ".".
+      if ((w32fd->cFileName[0] != '.') && (w32fd->cFileName[1] != 0))
+        __debugbreak();
+#endif
+
+      ++w32fd;
+      while (::FindNextFileW(fff, w32fd)) {
+        // stuff the offset to the parent directory.
+        w32fd->dwReserved0 = std::get<1>(e);
+
+        if (w32fd->dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
+          ++reparse_count;
+        } else if (w32fd->dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+          if (AddDir(w32fd->cFileName)) {
+            found_dirs.emplace_back((std::get<0>(e) + L"\\") + w32fd->cFileName, 
+                                     DWORD(w32fd) - DWORD(start));
+            ++dir_count;
+          }
         }
 
         ++all_count;
+        ++w32fd;
       }
 
-      ++w32fd;
       ::FindClose(fff);
     }
 
-    pending_dirs = found_dirs;
+    pending_dirs.swap(found_dirs);
     found_dirs.clear();
   }
+
+  //if (all_count != 393625) != 419399)
+  //  __debugbreak();
+
+  header->bytes = DWORD(w32fd) - DWORD(start);
+  header->num_dirs = dir_count;
+  header->num_nodes = all_count;
+  header->status = FFS_kUpdating;
 
   return true;
 }
@@ -166,15 +207,15 @@ int ExceptionFilter(EXCEPTION_POINTERS *ep, BYTE* start, DWORD max_size) {
   // In our range, map another meg.
   auto new_addr = ::VirtualAlloc(addr, 1024 * 1024, MEM_COMMIT, PAGE_READWRITE);
   if (!new_addr)
-    __debugbreak();
+    EXCEPTION_EXECUTE_HANDLER;
   return EXCEPTION_CONTINUE_EXECUTION;
 }
 
 int __stdcall wWinMain(HINSTANCE module, HINSTANCE, wchar_t* cc, int) {
   const wchar_t dir[] = L"f:\\src";
 
-  // optimistically try to fit all data in 300 MB.
-  const DWORD kMaxSize = 1024 * 1024 * 300;
+  // All data must fit in 500MB.
+  const DWORD kMaxSize = 1024 * 1024 * 500;
   auto mmap = ::CreateFileMappingW(
       INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE | SEC_RESERVE, 0, kMaxSize, L"ffs_dir01");
   auto start = reinterpret_cast<BYTE*>(
@@ -187,6 +228,7 @@ int __stdcall wWinMain(HINSTANCE module, HINSTANCE, wchar_t* cc, int) {
       return 2;
 
   } __except (ExceptionFilter(GetExceptionInformation(), start, kMaxSize)) {
+    // Probably ran out of memory.
     return 3;
   }
 
