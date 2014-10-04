@@ -115,8 +115,15 @@ int RunMainUILoop() {
   return 0;
 }
 
+bool EndsWith(const std::wstring& full, const std::wstring& ending) {
+  if (full.length() < ending.length())
+    return false;
+
+  return (0 == full.compare(full.length() - ending.length(), ending.length(), ending));
+}
+
 // adapted to start from the back.
-DWORD Hash_FNV1a_32(BYTE* bp, size_t len) {
+DWORD Hash_FNV1a_32(const BYTE* bp, size_t len) {
   auto be = bp + len - 1;
   DWORD hval = 0x811c9dc5UL;
   while (bp <= be) {
@@ -127,6 +134,9 @@ DWORD Hash_FNV1a_32(BYTE* bp, size_t len) {
   return hval;
 }
 
+DWORD FileHash(const std::wstring& fname) {
+  return Hash_FNV1a_32(reinterpret_cast<const BYTE*>(&fname[0]), fname.size() * sizeof(wchar_t));
+}
 
 bool AddDir(const wchar_t* name) {
   if (name[0] != '.')
@@ -157,7 +167,13 @@ bool CreateFFS(BYTE* const start, DWORD size, const wchar_t* top_dir) {
   DWORD pending_fixes = 0;
   DWORD reparse_count = 0;
 
-  pending_dirs.emplace_back(top_dir, 0);
+  // Create a fake node with the root so code does not have special cases.
+  w32fd->dwFileAttributes = -1;
+  w32fd->dwReserved0 = 0;
+  w32fd->dwReserved1 = 0x8888;
+  wcscpy_s(w32fd->cFileName, top_dir);
+  pending_dirs.emplace_back(top_dir, DWORD(w32fd) - DWORD(start));
+  ++w32fd;
 
   while (pending_dirs.size()) {
     for (auto& e : pending_dirs) {
@@ -167,18 +183,11 @@ bool CreateFFS(BYTE* const start, DWORD size, const wchar_t* top_dir) {
         ++pending_fixes;
         continue;
       }
+      ++all_count;
       // stuff the offset to the parent directory.
       w32fd->dwReserved0 = std::get<1>(e);
-      ++all_count;
 
-#if defined(PARANOID)
-      // The first entry is always ".".
-      if ((w32fd->cFileName[0] != '.') || (w32fd->cFileName[1] != 0))
-        __debugbreak();
-#endif
-      auto hash = Hash_FNV1a_32(reinterpret_cast<BYTE*>(&std::get<0>(e)[0]),
-                                std::get<0>(e).size() * 2);
-
+      auto hash = FileHash(std::get<0>(e));
       dir_offsets[hash % FFS_BucketCount].emplace_back(DWORD(w32fd) - DWORD(start));
       ++w32fd;
       while (::FindNextFileW(fff, w32fd)) {
@@ -225,9 +234,76 @@ bool CreateFFS(BYTE* const start, DWORD size, const wchar_t* top_dir) {
     __debugbreak();
 #endif
 
+  auto next = reinterpret_cast<ULONG_PTR>(w32fd) + 16;
+  next &= 0xfffffff0;
+  auto next_offset = reinterpret_cast<DWORD*>(next);
+  *next_offset = 0xAA55AA55;
+  ++next_offset;
+
+  DWORD bucket_offsets[FFS_BucketCount];
+
+  int ix = 0;
+  for (auto& dof : dir_offsets) {
+    bucket_offsets[ix++] = DWORD(next_offset) - DWORD(start);
+    for (auto& dir : dof) {
+      *next_offset = dir;
+      ++next_offset;
+    }
+    *next_offset = 0;
+    ++next_offset;
+  }
+  
+  auto ffs_dir = reinterpret_cast<FFS_Dir*>(next_offset);
+  ffs_dir->count = dir_count;
+  memcpy(&ffs_dir->nodes[0], &bucket_offsets[0], FFS_BucketCount * sizeof(DWORD));
+  header->dir_offset = DWORD(ffs_dir) - DWORD(start);
+  header->status = FFS_kFinished;
   return true;
 }
 
+bool MatchesDirChain(DWORD start, const WIN32_FIND_DATA* w32fd, const std::wstring& path) {
+  std::wstring term(w32fd->cFileName);
+  if (!EndsWith(path, term))
+    return false;
+  if (!w32fd->dwReserved0) {
+    // reached the root of our data. this is the fake node that contains the absolute path
+    // the the root of the enumeration.
+    return (path == w32fd->cFileName);
+  }
+  // recurse.
+  auto remains = std::wstring(path, 0, path.size() - term.size() - 1);
+  auto nfd = reinterpret_cast<WIN32_FIND_DATA*>(w32fd->dwReserved0 + start);
+  return MatchesDirChain(start, nfd, remains);
+}
+
+const WIN32_FIND_DATA* GetDirectory(const FFS_Header* header, const std::wstring& path) {
+  if (path.empty())
+    return nullptr;
+
+  auto hash = FileHash(path);
+  auto start = DWORD(header);
+  const auto ffs_dir = reinterpret_cast<FFS_Dir*>(header->dir_offset + start);
+  auto head = reinterpret_cast<const DWORD*>(ffs_dir->nodes[hash % FFS_BucketCount] + start);
+
+  while (*head) {
+    auto curr_dir = reinterpret_cast<const WIN32_FIND_DATA*>(*head + start);
+    if ((curr_dir->dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0)
+      __debugbreak();
+
+    auto parent = reinterpret_cast<const WIN32_FIND_DATA*>(curr_dir->dwReserved0 + start);
+    if (MatchesDirChain(start, parent, path))
+      return curr_dir;
+    // move to next node with the same hash.
+    ++head;
+  }
+  // no more nodes with same hash.
+  return nullptr;
+}
+
+int Testing(const FFS_Header* header) {
+  auto fd1 = GetDirectory(header, L"f:\\src\\g0\\src\\athena");
+  return 0;
+}
 
 int ExceptionFilter(EXCEPTION_POINTERS *ep, BYTE* start, DWORD max_size) {
   if (ep->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION)
@@ -257,6 +333,8 @@ int __stdcall wWinMain(HINSTANCE module, HINSTANCE, wchar_t* cc, int) {
   __try {
     if (!CreateFFS(start, kMaxSize, dir))
       return 2;
+
+    Testing(reinterpret_cast<FFS_Header*>(start));
 
   } __except (ExceptionFilter(GetExceptionInformation(), start, kMaxSize)) {
     // Probably ran out of memory.

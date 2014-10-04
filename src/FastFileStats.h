@@ -7,8 +7,8 @@ struct FFS_Header {
   DWORD num_nodes;
   DWORD num_dirs;
   DWORD bytes;
-  DWORD pad1;
-  DWORD pad2;
+  DWORD dir_offset;
+  DWORD pad0;
 };
 
 enum FFS_Magic {
@@ -32,11 +32,7 @@ enum FFS_Buckets {
   FFS_BucketCount = 1543
 };
 
-struct FFS_DirNode {
-  DWORD offset[1];
-};
-
 struct FFS_Dir {
   DWORD count;
-  FFS_DirNode nodes[FFS_BucketCount];
+  DWORD nodes[FFS_BucketCount];
 };
