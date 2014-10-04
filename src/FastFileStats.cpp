@@ -300,8 +300,44 @@ const WIN32_FIND_DATA* GetDirectory(const FFS_Header* header, const std::wstring
   return nullptr;
 }
 
+const WIN32_FIND_DATA* GetLeaf(const WIN32_FIND_DATA* dot_node, const std::wstring& name) {
+  DWORD group_id = dot_node->dwReserved0;
+  auto curr  = dot_node + 1;
+  while (curr->dwReserved0 == group_id) {
+    if (name == curr->cFileName)
+      return curr;
+    ++curr;
+  }
+  return nullptr;
+}
+
+const WIN32_FIND_DATA* GetNode(const FFS_Header* header, const std::wstring& path) {
+  if (path.size() < 3)
+    return nullptr;
+  if (path[1] != L':')
+    return nullptr;
+  if (path[path.size() - 1] == L'\\') {
+    auto rez = path.substr(0, path.size() - 1);
+    return GetDirectory(header, rez);
+  }
+
+  auto trail = path.rfind(L'\\');
+  if (trail == std::wstring::npos)
+    return nullptr;
+  auto dir = path.substr(0, trail);
+  auto leaf = path.substr(trail + 1);
+  auto w32fd = GetDirectory(header, dir);
+  if (!w32fd)
+    return nullptr;
+  if (!w32fd->dwReserved0)
+    return nullptr;                      // $$$ fix this.
+  return GetLeaf(w32fd, leaf);
+}
+
 int Testing(const FFS_Header* header) {
   auto fd1 = GetDirectory(header, L"f:\\src\\g0\\src\\athena");
+  auto fd2 = GetNode(header, L"f:\\src\\g0\\src\\cc\\layers\\image_layer.h");
+  auto fd3 = GetNode(header, L"f:\\src\\g0\\src\\chrome\\app\\resources\\terms\\");
   return 0;
 }
 
