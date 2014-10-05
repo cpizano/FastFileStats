@@ -221,19 +221,6 @@ bool CreateFFS(BYTE* const start, DWORD size, const wchar_t* top_dir) {
   header->num_nodes = all_count;
   header->status = FFS_kUpdating;
 
-#if defined(PARANOID)
-  int cc_h = 0;
-  int cc_l = 0;
-  for (auto& i : dir_offsets) {
-    if (i.size() > 67) ++cc_h;
-    if (i.size() < 5) ++cc_l;
-  }
-  if (cc_h > 10)
-    __debugbreak();
-  if (cc_l > 10)
-    __debugbreak();
-#endif
-
   auto next = reinterpret_cast<ULONG_PTR>(w32fd) + 16;
   next &= 0xfffffff0;
   auto next_offset = reinterpret_cast<DWORD*>(next);
@@ -354,27 +341,83 @@ int ExceptionFilter(EXCEPTION_POINTERS *ep, BYTE* start, DWORD max_size) {
   return EXCEPTION_CONTINUE_EXECUTION;
 }
 
+void CALLBACK ChangesCompletionCB(DWORD error, DWORD bytes, OVERLAPPED* ov) {
+  if (!bytes)
+    return;
+  auto fni = reinterpret_cast<FILE_NOTIFY_INFORMATION*>(ov->hEvent);
+  while (true) {
+    switch (fni->Action) {
+      case FILE_ACTION_ADDED:
+        break;
+      case FILE_ACTION_REMOVED:
+        break;
+      case FILE_ACTION_MODIFIED:
+        break;
+      case FILE_ACTION_RENAMED_OLD_NAME:
+        break;
+      case FILE_ACTION_RENAMED_NEW_NAME:
+        break;
+    }
+
+    if (!fni->NextEntryOffset)
+      break;
+    fni = reinterpret_cast<FILE_NOTIFY_INFORMATION*>(
+        reinterpret_cast<BYTE*>(fni) + fni->NextEntryOffset);
+  }
+}
+
+bool StartWatchingTree(const wchar_t* dir) {
+  const size_t kChageBufferSz = 1024 * 16;
+  const auto kFilter = FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME |
+                       FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_CREATION |
+                       FILE_NOTIFY_CHANGE_SIZE;
+
+  auto kShareAll = FILE_SHARE_DELETE | FILE_SHARE_READ | FILE_SHARE_WRITE;
+  auto dir_handle = ::CreateFileW(dir, GENERIC_READ, kShareAll, 
+      NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED, NULL);
+
+  if (dir_handle == INVALID_HANDLE_VALUE)
+    return false;
+
+  auto change_buff = new BYTE[kChageBufferSz];
+  auto ov = new OVERLAPPED {0};
+  ov->hEvent = HANDLE(change_buff);
+  if (!::ReadDirectoryChangesW(dir_handle, 
+                               change_buff, kChageBufferSz,
+                               TRUE, kFilter,  NULL, ov, &ChangesCompletionCB))
+    return false;
+  return true;
+}
+
 int __stdcall wWinMain(HINSTANCE module, HINSTANCE, wchar_t* cc, int) {
   const wchar_t dir[] = L"f:\\src";
 
   // All data must fit in 500MB.
-  const DWORD kMaxSize = 1024 * 1024 * 500;
+  const DWORD kMaxSharedSize = 1024 * 1024 * 500;
   auto mmap = ::CreateFileMappingW(
-      INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE | SEC_RESERVE, 0, kMaxSize, L"ffs_dir01");
+      INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE | SEC_RESERVE, 0, kMaxSharedSize, L"ffs_f#!src");
   auto start = reinterpret_cast<BYTE*>(
-      ::MapViewOfFile(mmap, FILE_MAP_ALL_ACCESS, 0, 0, kMaxSize));
+      ::MapViewOfFile(mmap, FILE_MAP_ALL_ACCESS, 0, 0, kMaxSharedSize));
   if (!start)
     return 1;
 
   __try {
-    if (!CreateFFS(start, kMaxSize, dir))
+
+    if (!StartWatchingTree(dir))
       return 2;
+
+    if (!CreateFFS(start, kMaxSharedSize, dir))
+      return 3;
+
+    while (true) {
+      ::SleepEx(INFINITE, TRUE);
+    }
 
     Testing(reinterpret_cast<FFS_Header*>(start));
 
-  } __except (ExceptionFilter(GetExceptionInformation(), start, kMaxSize)) {
+  } __except (ExceptionFilter(GetExceptionInformation(), start, kMaxSharedSize)) {
     // Probably ran out of memory.
-    return 3;
+    return 6;
   }
 
   return RunMainUILoop();
