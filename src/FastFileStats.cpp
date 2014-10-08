@@ -1,5 +1,34 @@
 ///////////////////////////////////////////////////////////////////////////////////////////////////
-// Server main entry point.
+// Server main.
+//
+// The FFS server job is to keep an up-to date Shared section with information about a directory
+// tree. The format of the shared section is mostly compatible with what FindFirstFile and
+// FindNextFile return with some important caveats.
+// 
+// Clients are expected to map this shared section and use it to speed up directory enumeration
+// and file stat'ing.  The shared section can be big, in the order of 30 MB for the chromium
+// source tree, at its initial state. As mutations happen to the tree, it can grow all the way to
+// the value of kMaxSharedSize.
+//
+// The basic block of the shared section is a lite version of WIN32_FIND_DATA. The SDK version of
+// this structure is over 512 bytes (!) so the lite version only extends to the string size of the 
+// cFileName member. Which in average gives us 9x smaller footprint for large trees.
+//
+// When the server starts it does an initial pass enumerating every file in the tree given as input
+// and then enters in monitor mode using ReadDirectoryChangesW.
+//
+// Along with the basic blocks, there are 3 main navigational structures in the shared section:
+// 1- Directory hashtable : given a directory name hash, it will point to the set of directories
+//                          basic blocks that have the same hash.
+// 2- Parent linked list  : given a directory basic block, it points to the parent directory.
+// 3- Sibling linked list : given a basic block it will give you the next basic block of the same
+//                          directory.
+//
+// #2 is constructed using dwReserved0
+// #3 is constructed using dwReserved1 and dwReserved0
+// #1 is stand-alone and lives at the end of the initial pass.
+//
+// With these 3 primitives we expect to be able to do all querys and updates needed. 
 
 #include "stdafx.h"
 
@@ -11,6 +40,13 @@
 #include "FastFileStats.h"
 
 #define PARANOID 1
+
+// All shared data must fit in 300MB.
+const DWORD kMaxSharedSize = 1024 * 1024 * 300;
+
+const auto kFilter = FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME |
+                      FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_CREATION |
+                      FILE_NOTIFY_CHANGE_SIZE;
 
 template <typename T, typename U>
 T VerifyNot(T actual, U error) {
@@ -55,18 +91,31 @@ bool AddDir(const wchar_t* name) {
   return false;
 }
 
+WIN32_FIND_DATA* AdvanceNext(WIN32_FIND_DATA* current) {
+  DWORD len = (wcslen(current->cFileName) + 1) * sizeof(wchar_t);
+  len = (len + 8 ) & ~7;
+  current->dwReserved1 = len;
+  return reinterpret_cast<WIN32_FIND_DATA*>(
+      reinterpret_cast<BYTE*>(&current->cFileName[0]) + len);
+}
+
+const WIN32_FIND_DATA* AdvanceNext(const WIN32_FIND_DATA* current) {
+  if (!current->dwReserved1)
+    __debugbreak();
+  return reinterpret_cast<const WIN32_FIND_DATA*>(
+      reinterpret_cast<const BYTE*>(&current->cFileName[0]) + current->dwReserved1);
+}
+
 bool CreateFFS(BYTE* const start, DWORD size, const wchar_t* top_dir) {
   auto mem = start;
   auto header = reinterpret_cast<FFS_Header*>(mem);
   *header = FFS_Header{FFS_kMagic, FFS_kVersion, FFS_kBooting, 0, 0, 0};
   mem += sizeof(*header);
-  auto w32fd = reinterpret_cast<WIN32_FIND_DATA*>(mem);
 
   typedef std::tuple<std::wstring, DWORD> Entry;
 
   std::vector<Entry> pending_dirs;
   std::vector<Entry> found_dirs;
-
   std::vector<DWORD> dir_offsets[FFS_BucketCount];
 
   DWORD all_count = 0;
@@ -74,13 +123,16 @@ bool CreateFFS(BYTE* const start, DWORD size, const wchar_t* top_dir) {
   DWORD pending_fixes = 0;
   DWORD reparse_count = 0;
 
-  // Create a fake node with the root so code does not have special cases.
+  // The first node is a fake node with the root so we don't have special cases.
+  auto w32fd = reinterpret_cast<WIN32_FIND_DATA*>(mem);
   w32fd->dwFileAttributes = -1;
   w32fd->dwReserved0 = 0;
-  w32fd->dwReserved1 = 0x8888;
+  w32fd->dwReserved1 = 0;
   wcscpy_s(w32fd->cFileName, top_dir);
-  pending_dirs.emplace_back(top_dir, DWORD(w32fd) - DWORD(start));
-  ++w32fd;
+  header->root_offset = DWORD(w32fd) - DWORD(start);
+
+  pending_dirs.emplace_back(top_dir, header->root_offset);
+  w32fd = AdvanceNext(w32fd);
 
   while (pending_dirs.size()) {
     for (auto& e : pending_dirs) {
@@ -96,7 +148,8 @@ bool CreateFFS(BYTE* const start, DWORD size, const wchar_t* top_dir) {
 
       auto hash = FileHash(std::get<0>(e));
       dir_offsets[hash % FFS_BucketCount].emplace_back(DWORD(w32fd) - DWORD(start));
-      ++w32fd;
+      w32fd = AdvanceNext(w32fd);
+
       while (::FindNextFileW(fff, w32fd)) {
         // stuff the offset to the parent directory.
         w32fd->dwReserved0 = std::get<1>(e);
@@ -112,7 +165,7 @@ bool CreateFFS(BYTE* const start, DWORD size, const wchar_t* top_dir) {
         }
 
         ++all_count;
-        ++w32fd;
+        w32fd = AdvanceNext(w32fd);
       }
 
       ::FindClose(fff);
@@ -196,11 +249,11 @@ const WIN32_FIND_DATA* GetDirectory(const FFS_Header* header, const std::wstring
 
 const WIN32_FIND_DATA* GetLeaf(const WIN32_FIND_DATA* dot_node, const std::wstring& name) {
   DWORD group_id = dot_node->dwReserved0;
-  auto curr  = dot_node + 1;
+  auto curr  = AdvanceNext(dot_node);
   while (curr->dwReserved0 == group_id) {
     if (name == curr->cFileName)
       return curr;
-    ++curr;
+    curr = AdvanceNext(curr);
   }
   return nullptr;
 }
@@ -248,17 +301,55 @@ int ExceptionFilter(EXCEPTION_POINTERS *ep, BYTE* start, DWORD max_size) {
   return EXCEPTION_CONTINUE_EXECUTION;
 }
 
+void UpdateModified(FFS_Header* header, WIN32_FIND_DATA* oldfd) {
+  WIN32_FIND_DATA newfd;
+  auto fff = ::FindFirstFileW(oldfd->cFileName, &newfd);
+  ::FindClose(fff);
+  int count = 0;
+
+  if (oldfd->ftLastWriteTime.dwLowDateTime != newfd.ftLastWriteTime.dwLowDateTime)
+    count += 1;
+  if (oldfd->ftLastWriteTime.dwHighDateTime != newfd.ftLastWriteTime.dwHighDateTime)
+    count += 2;
+  if (oldfd->nFileSizeHigh != newfd.nFileSizeHigh)
+    count += 4;
+  if (oldfd->nFileSizeLow != newfd.nFileSizeLow)
+    count += 8;
+}
+
+struct Context {
+  FFS_Header* ffs_header;
+  HANDLE top_dir;
+  BYTE io_buff[1024 * 16];
+};
+
 void CALLBACK ChangesCompletionCB(DWORD error, DWORD bytes, OVERLAPPED* ov) {
   if (!bytes)
     return;
-  auto fni = reinterpret_cast<FILE_NOTIFY_INFORMATION*>(ov->hEvent);
+  auto ctx = reinterpret_cast<Context*>(ov->hEvent);
+  static std::wstring root = std::wstring(reinterpret_cast<WIN32_FIND_DATA*>(
+      ctx->ffs_header->root_offset + DWORD(ctx->ffs_header))->cFileName) + L"\\";
+
+  auto fni = reinterpret_cast<FILE_NOTIFY_INFORMATION*>(ctx->io_buff);
+  if (!fni->FileNameLength)
+    return;
+
+  ctx->ffs_header->status = FFS_kUpdating;
+
+  int count = 0;
   while (true) {
+    ++count;
+    // regarless of the notification, see if we have it.
+    auto path = root + std::wstring(fni->FileName, fni->FileNameLength / sizeof(wchar_t));
+    auto node = GetNode(ctx->ffs_header, path);
+
     switch (fni->Action) {
       case FILE_ACTION_ADDED:
         break;
       case FILE_ACTION_REMOVED:
         break;
       case FILE_ACTION_MODIFIED:
+        UpdateModified(ctx->ffs_header, const_cast<WIN32_FIND_DATA*>(node));
         break;
       case FILE_ACTION_RENAMED_OLD_NAME:
         break;
@@ -271,26 +362,24 @@ void CALLBACK ChangesCompletionCB(DWORD error, DWORD bytes, OVERLAPPED* ov) {
     fni = reinterpret_cast<FILE_NOTIFY_INFORMATION*>(
         reinterpret_cast<BYTE*>(fni) + fni->NextEntryOffset);
   }
+
+  // subscribe again.
+  ::ReadDirectoryChangesW(ctx->top_dir, ctx->io_buff, sizeof(ctx->io_buff),
+                          TRUE, kFilter,  NULL, ov, &ChangesCompletionCB);
 }
 
-bool StartWatchingTree(const wchar_t* dir) {
-  const size_t kChageBufferSz = 1024 * 16;
-  const auto kFilter = FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME |
-                       FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_CREATION |
-                       FILE_NOTIFY_CHANGE_SIZE;
-
+bool StartWatchingTree(const wchar_t* dir, FFS_Header* ffs_header) {
   auto kShareAll = FILE_SHARE_DELETE | FILE_SHARE_READ | FILE_SHARE_WRITE;
   auto dir_handle = ::CreateFileW(dir, GENERIC_READ, kShareAll, 
       NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED, NULL);
 
   if (dir_handle == INVALID_HANDLE_VALUE)
     return false;
-
-  auto change_buff = new BYTE[kChageBufferSz];
+  auto ctx = new Context {ffs_header, dir_handle};
   auto ov = new OVERLAPPED {0};
-  ov->hEvent = HANDLE(change_buff);
+  ov->hEvent = HANDLE(ctx);
   if (!::ReadDirectoryChangesW(dir_handle, 
-                               change_buff, kChageBufferSz,
+                               ctx->io_buff, sizeof(ctx->io_buff),
                                TRUE, kFilter,  NULL, ov, &ChangesCompletionCB))
     return false;
   return true;
@@ -299,10 +388,8 @@ bool StartWatchingTree(const wchar_t* dir) {
 int __stdcall wWinMain(HINSTANCE module, HINSTANCE, wchar_t* cc, int) {
   const wchar_t dir[] = L"f:\\src";
 
-  // All data must fit in 500MB.
-  const DWORD kMaxSharedSize = 1024 * 1024 * 500;
   auto mmap = ::CreateFileMappingW(
-      INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE | SEC_RESERVE, 0, kMaxSharedSize, L"ffs_f#!src");
+      INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE | SEC_RESERVE, 0, kMaxSharedSize, L"ffs_(f)!src");
   auto start = reinterpret_cast<BYTE*>(
       ::MapViewOfFile(mmap, FILE_MAP_ALL_ACCESS, 0, 0, kMaxSharedSize));
   if (!start)
@@ -310,17 +397,17 @@ int __stdcall wWinMain(HINSTANCE module, HINSTANCE, wchar_t* cc, int) {
 
   __try {
 
-    if (!StartWatchingTree(dir))
+    if (!StartWatchingTree(dir, reinterpret_cast<FFS_Header*>(start)))
       return 2;
 
     if (!CreateFFS(start, kMaxSharedSize, dir))
       return 3;
 
+    Testing(reinterpret_cast<FFS_Header*>(start));
+
     while (true) {
       ::SleepEx(INFINITE, TRUE);
     }
-
-    Testing(reinterpret_cast<FFS_Header*>(start));
     return 0;
 
   } __except (ExceptionFilter(GetExceptionInformation(), start, kMaxSharedSize)) {

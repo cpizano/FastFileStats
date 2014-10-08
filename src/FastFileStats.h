@@ -8,7 +8,7 @@ struct FFS_Header {
   DWORD num_dirs;
   DWORD bytes;
   DWORD dir_offset;
-  DWORD pad0;
+  DWORD root_offset;
 };
 
 enum FFS_Magic {
