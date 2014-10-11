@@ -28,7 +28,47 @@
 // #3 is constructed using dwReserved1 and dwReserved0
 // #1 is stand-alone and lives at the end of the initial pass.
 //
-// With these 3 primitives we expect to be able to do all querys and updates needed. 
+// With these 3 primitives we expect to be able to do all querys and updates needed.
+//
+// Here is an ilustrated example: for c:\\DirA\DirB\fileX and c:\\DirA\FileY
+//
+//   hash-table
+//      +---+                                            hash-row
+//     0|   |                                 +--+--+------+--+-----------------+--+
+//      +---+                                 |  |  |      |  |                 |0 |
+//     1|   |-------------------------------->+--+--+------+--+-----------------+--+
+//      +---+                                                |
+//     2|   |                 hash-row                       |
+//      +---+        +--+--+--+--+--------+--+----+--+       |
+//     3|   |------->|  |  |  |  |        |  |    |0 |       |
+//      +---+        +--+--+--+--+--------+--+----+--+       |
+//     4|   |                  |                             |
+//      +---+                  |                             |
+//     5|   |              +---v-------+ dwReserved0   +-----v------+ dwReserved0  
+//      +---+              | dot-dir   |--->---+       | dot-dir    |->-------+     
+//      |   |              +---+-------+       |       +-----+------+         |    
+//      |   |                  |               |             |                |       
+//      |   |                  |dwReserved1    |             |dwReserved1     |      
+//      |   |                  |               |             |                |      
+//      |   |              +---v-------+       +----- >+-----v------+         |  
+//      |   |              |           |       |       |            |         |  
+// 1543 |   |              |  fileX    |--->---+       |  dirB      |->-------+  
+//      +---+              +---+-------+       |       +-----+------+         | 
+//                             |               |             |                |         
+//                             |               |             |                |         
+//                         +---v-------+       |       +-----v------+         |        root
+//                         |           |       |       |  fileY     |->-------+--->+------------+
+//                         |           +--->---+       +------------+              | c:\\dirA   |
+//                         +-----------+                                           +------------+
+//
+//  The hash table points to the start of each hash-row vector (which is the set of all entities
+//  with the same hash, and it is terminated by a 0. Each hash-row vecrtor entry points to the
+//  first entry (dot file) of each directory. Each entry (WIN32_FIND_DATA) has two pointers: one
+//  to the next entry on the same directory and one to the entry that represents the parent.
+//
+//  Each entry cFileName member only contains the path component. Only the root entry (which bwt
+//  is fake) contains the full volume path.
+//
 
 #include "stdafx.h"
 
