@@ -62,7 +62,7 @@
 //                         +-----------+                                           +------------+
 //
 //  The hash table points to the start of each hash-row vector (which is the set of all entities
-//  with the same hash, and it is terminated by a 0). Each hash-row vecrtor entry points to the
+//  with the same hash, and it is terminated by a 0). Each hash-row vector entry points to the
 //  first entry (dot file) of each directory. Each entry (WIN32_FIND_DATA) has two pointers: one
 //  to the next entry on the same directory and one to the entry that represents the parent.
 //
@@ -316,26 +316,6 @@ const WIN32_FIND_DATA* GetNode(const FFS_Header* header, const std::wstring& pat
   return GetLeaf(w32fd, leaf);
 }
 
-int Testing(const FFS_Header* header) {
-  auto fd1 = GetDirectory(header, L"f:\\src\\g0\\src\\athena");
-  auto fd2 = GetNode(header, L"f:\\src\\g0\\src\\cc\\layers\\image_layer.h");
-  auto fd3 = GetNode(header, L"f:\\src\\g0\\src\\chrome\\app\\resources\\terms\\");
-  return 0;
-}
-
-int ExceptionFilter(EXCEPTION_POINTERS *ep, BYTE* start, DWORD max_size) {
-  if (ep->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION)
-    return EXCEPTION_CONTINUE_SEARCH;
-  auto addr = reinterpret_cast<BYTE*>(ep->ExceptionRecord->ExceptionInformation[1]);
-  if ((addr < start) || (addr > (start + max_size)))
-    return EXCEPTION_CONTINUE_SEARCH;
-  // In our range, map another meg.
-  auto new_addr = ::VirtualAlloc(addr, 1024 * 1024, MEM_COMMIT, PAGE_READWRITE);
-  if (!new_addr)
-    EXCEPTION_EXECUTE_HANDLER;
-  return EXCEPTION_CONTINUE_EXECUTION;
-}
-
 void UpdateModified(FFS_Header* header, WIN32_FIND_DATA* oldfd) {
   WIN32_FIND_DATA newfd;
   auto fff = ::FindFirstFileW(oldfd->cFileName, &newfd);
@@ -418,6 +398,33 @@ bool StartWatchingTree(const wchar_t* dir, FFS_Header* ffs_header) {
                                TRUE, kFilter,  NULL, ov, &ChangesCompletionCB))
     return false;
   return true;
+}
+
+int Testing(const FFS_Header* header) {
+  auto fd1 = GetDirectory(header, L"f:\\src\\g0\\src\\athena");
+  if (!fd1)
+    __debugbreak();
+  auto fd2 = GetNode(header, L"f:\\src\\g0\\src\\cc\\layers\\image_layer.h");
+  if (!fd2)
+    __debugbreak();
+  auto fd3 = GetNode(header, L"f:\\src\\g0\\src\\chrome\\app\\resources\\terms\\");
+  if (!fd3)
+    __debugbreak();
+  return 0;
+}
+
+// The shared memory is demand-paged via SEH.
+int ExceptionFilter(EXCEPTION_POINTERS *ep, BYTE* start, DWORD max_size) {
+  if (ep->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION)
+    return EXCEPTION_CONTINUE_SEARCH;
+  auto addr = reinterpret_cast<BYTE*>(ep->ExceptionRecord->ExceptionInformation[1]);
+  if ((addr < start) || (addr > (start + max_size)))
+    return EXCEPTION_CONTINUE_SEARCH;
+  // In our range, map another meg.
+  auto new_addr = ::VirtualAlloc(addr, 1024 * 1024, MEM_COMMIT, PAGE_READWRITE);
+  if (!new_addr)
+    EXCEPTION_EXECUTE_HANDLER;
+  return EXCEPTION_CONTINUE_EXECUTION;
 }
 
 int __stdcall wWinMain(HINSTANCE module, HINSTANCE, wchar_t* cc, int) {
