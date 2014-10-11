@@ -1,5 +1,11 @@
 #pragma once
 
+enum FFS_Consts {
+  FFS_kVersion = 1,
+  FFS_BucketCount = 1543,
+  FFS_kMagic = 0x8855bed,
+};
+
 struct FFS_Header {
   DWORD magic;
   DWORD version;
@@ -7,16 +13,9 @@ struct FFS_Header {
   DWORD num_nodes;
   DWORD num_dirs;
   DWORD bytes;
-  DWORD dir_offset;
   DWORD root_offset;
-};
-
-enum FFS_Magic {
-  FFS_kMagic = 0x8855bed
-};
-
-enum FFS_Version {
-  FFS_kVersion = 1
+  DWORD pad0;
+  DWORD hash_tbl[FFS_BucketCount];
 };
 
 enum FFS_Status {
@@ -26,13 +25,4 @@ enum FFS_Status {
   FFS_kUpdating       = 3,
   FFS_kFinished       = 4,
   FFS_kFrozen         = 5,
-};
-
-enum FFS_Buckets {
-  FFS_BucketCount = 1543
-};
-
-struct FFS_Dir {
-  DWORD count;
-  DWORD nodes[FFS_BucketCount];
 };

@@ -32,7 +32,7 @@
 //
 // Here is an ilustrated example: for c:\\DirA\DirB\fileX and c:\\DirA\FileY
 //
-//   hash-table
+//     hash_tlb
 //      +---+                                            hash-row
 //     0|   |                                 +--+--+------+--+-----------------+--+
 //      +---+                                 |  |  |      |  |                 |0 |
@@ -62,7 +62,7 @@
 //                         +-----------+                                           +------------+
 //
 //  The hash table points to the start of each hash-row vector (which is the set of all entities
-//  with the same hash, and it is terminated by a 0. Each hash-row vecrtor entry points to the
+//  with the same hash, and it is terminated by a 0). Each hash-row vecrtor entry points to the
 //  first entry (dot file) of each directory. Each entry (WIN32_FIND_DATA) has two pointers: one
 //  to the next entry on the same directory and one to the entry that represents the parent.
 //
@@ -221,17 +221,16 @@ bool CreateFFS(BYTE* const start, DWORD size, const wchar_t* top_dir) {
   header->num_nodes = all_count;
   header->status = FFS_kUpdating;
 
+  // create each hash-row:
   auto next = reinterpret_cast<ULONG_PTR>(w32fd) + 16;
   next &= 0xfffffff0;
   auto next_offset = reinterpret_cast<DWORD*>(next);
   *next_offset = 0xAA55AA55;
   ++next_offset;
 
-  DWORD bucket_offsets[FFS_BucketCount];
-
   int ix = 0;
   for (auto& dof : dir_offsets) {
-    bucket_offsets[ix++] = DWORD(next_offset) - DWORD(start);
+    header->hash_tbl[ix++] = DWORD(next_offset) - DWORD(start);
     for (auto& dir : dof) {
       *next_offset = dir;
       ++next_offset;
@@ -240,10 +239,7 @@ bool CreateFFS(BYTE* const start, DWORD size, const wchar_t* top_dir) {
     ++next_offset;
   }
   
-  auto ffs_dir = reinterpret_cast<FFS_Dir*>(next_offset);
-  ffs_dir->count = dir_count;
-  memcpy(&ffs_dir->nodes[0], &bucket_offsets[0], FFS_BucketCount * sizeof(DWORD));
-  header->dir_offset = DWORD(ffs_dir) - DWORD(start);
+  // |next_offset| contains the first free block left in the shared section.
   header->status = FFS_kFinished;
   return true;
 }
@@ -269,8 +265,7 @@ const WIN32_FIND_DATA* GetDirectory(const FFS_Header* header, const std::wstring
 
   auto hash = FileHash(path);
   auto start = DWORD(header);
-  const auto ffs_dir = reinterpret_cast<FFS_Dir*>(header->dir_offset + start);
-  auto head = reinterpret_cast<const DWORD*>(ffs_dir->nodes[hash % FFS_BucketCount] + start);
+  auto head = reinterpret_cast<const DWORD*>(header->hash_tbl[hash % FFS_BucketCount] + start);
 
   while (*head) {
     auto curr_dir = reinterpret_cast<const WIN32_FIND_DATA*>(*head + start);
