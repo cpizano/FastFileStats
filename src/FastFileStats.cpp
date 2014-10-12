@@ -69,6 +69,12 @@
 //  Each entry cFileName member only contains the path component. Only the root entry (which bwt
 //  is fake) contains the full volume path.
 //
+//  TODO:
+//  1- implement updates in UpdateModified()
+//      to do this, a custom memory allocator might be needed that manages blocks in the shared
+//      section.
+//  2- implement the client.
+//
 
 #include "stdafx.h"
 
